@@ -28,12 +28,12 @@ Sin estos ítems el proyecto no debe ir a producción.
 
 Para que el pipeline pueda monitorearse y recuperarse sin intervención manual.
 
-- [ ] Reemplazar todos los `print()` por `logging.getLogger(__name__)` con niveles INFO/WARNING/ERROR
-- [ ] Añadir `ExternalTaskSensor` al inicio de `ingest_datasets` para esperar que `sync_catalog` termine correctamente antes de leer el catálogo
-- [ ] Añadir `max_active_runs=1` en ambos DAGs para evitar solapamiento de ejecuciones
-- [ ] Configurar SLAs por tarea (`sla=timedelta(minutes=30)` en `sync_catalog`, `sla=timedelta(hours=2)` en `ingest_datasets`)
-- [ ] Configurar alerta de fallo por email o Slack (`on_failure_callback`) en ambos DAGs
-- [ ] Cambiar `trigger_rule` de `trigger_glue_crawler` a `none_failed_min_one_success` para que no falle si alguna categoría individual falla
+- [x] Reemplazar todos los `print()` por `logging.getLogger(__name__)` con niveles INFO/WARNING/ERROR
+- [x] Añadir `ExternalTaskSensor` al inicio de `ingest_datasets` para esperar que `sync_catalog` termine correctamente antes de leer el catálogo
+- [x] Añadir `max_active_runs=1` en ambos DAGs para evitar solapamiento de ejecuciones
+- [x] Configurar SLAs por tarea (`sla=timedelta(minutes=30)` en `sync_catalog`, `sla=timedelta(hours=2)` en `ingest_datasets`)
+- [x] Configurar alerta de fallo por email o Slack (`on_failure_callback`) en ambos DAGs (`dags/utils/callbacks.py`)
+- [x] Cambiar `trigger_rule` de `trigger_glue_crawler` a `none_failed_min_one_success` para que no falle si alguna categoría individual falla
 
 ---
 

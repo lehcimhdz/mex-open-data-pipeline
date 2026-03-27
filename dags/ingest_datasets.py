@@ -34,7 +34,10 @@ import boto3
 import httpx
 from airflow.decorators import dag, task
 from airflow.models import Variable
+from airflow.sensors.external_task import ExternalTaskSensor
+from airflow.utils.trigger_rule import TriggerRule
 
+from utils.callbacks import on_dag_failure
 from utils.converters import csv_to_parquet, excel_to_json
 from utils.s3_client import download_json, list_folder_prefixes, upload
 
@@ -192,9 +195,11 @@ async def _process_resource(client, resource, category_slug: str, dataset_slug: 
     schedule="0 7 * * 1-5",
     start_date=datetime(2026, 1, 1),
     catchup=False,
+    max_active_runs=1,
     default_args={
         "retries": 1,
         "retry_delay": timedelta(minutes=15),
+        "on_failure_callback": on_dag_failure,
     },
     tags=["ingest", "datos-gob-mx"],
     doc_md=__doc__,
@@ -208,7 +213,7 @@ def ingest_datasets():
         # Each prefix looks like "raw/seguridad/" — extract the slug
         return [p.split("/")[1] for p in prefixes if p.split("/")[1]]
 
-    @task(execution_timeout=timedelta(hours=3))
+    @task(execution_timeout=timedelta(hours=3), sla=timedelta(hours=2))
     def ingest_category(category_slug: str) -> dict:
         """Download every dataset in *category_slug* and upload to raw + curated.
 
@@ -267,7 +272,7 @@ def ingest_datasets():
 
         return asyncio.run(_run())
 
-    @task
+    @task(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
     def trigger_glue_crawler(results: list[dict]) -> str:
         """Start the Glue crawler only if at least one dataset was updated today."""
         total_ok = sum(r.get("ok", 0) for r in results)
@@ -284,9 +289,22 @@ def ingest_datasets():
         log.info("Glue crawler '%s' started (%d datasets updated)", crawler_name, total_ok)
         return f"crawler_started:{crawler_name}"
 
+    # Wait for sync_catalog to finish before reading catalogs from S3.
+    # mode="reschedule" frees the worker slot while the sensor is poking.
+    wait_for_catalog = ExternalTaskSensor(
+        task_id="wait_for_catalog",
+        external_dag_id="sync_catalog",
+        external_task_id=None,  # None = wait for the whole DAG to succeed
+        mode="reschedule",
+        timeout=3600,           # give up after 1 h if sync_catalog hasn't finished
+        poke_interval=60,
+    )
+
     slugs = get_category_slugs()
     results = ingest_category.expand(category_slug=slugs)
     trigger_glue_crawler(results)
+
+    wait_for_catalog >> slugs
 
 
 ingest_datasets()

@@ -18,12 +18,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta
 
 from airflow.decorators import dag, task
 from airflow.models import Variable
 
+from utils.callbacks import on_dag_failure
 from utils.s3_client import upload  # noqa: E402  (Airflow adds dags/ to sys.path)
+
+log = logging.getLogger(__name__)
 
 
 def _bucket() -> str:
@@ -35,9 +39,11 @@ def _bucket() -> str:
     schedule="0 6 * * 1-5",
     start_date=datetime(2026, 1, 1),
     catchup=False,
+    max_active_runs=1,
     default_args={
         "retries": 2,
         "retry_delay": timedelta(minutes=5),
+        "on_failure_callback": on_dag_failure,
     },
     tags=["catalog", "datos-gob-mx"],
     doc_md=__doc__,
@@ -52,11 +58,12 @@ def sync_catalog():
         async def _run() -> list[str]:
             async with DatosGobMX(request_delay=0.5, max_retries=3) as client:
                 cats = await client.get_categories()
+            log.info("Fetched %d categories from datos.gob.mx", len(cats))
             return [c.slug for c in cats]
 
         return asyncio.run(_run())
 
-    @task
+    @task(sla=timedelta(minutes=30))
     def fetch_and_store_category(category_slug: str) -> dict:
         """Fetch category metadata + full dataset listing and write to S3."""
         from open_data_mexico import DatosGobMX
@@ -79,7 +86,9 @@ def sync_catalog():
             content_type="application/json",
         )
 
-        return {"category_slug": category_slug, "dataset_count": len(payload["datasets"])}
+        count = len(payload["datasets"])
+        log.info("[%s] catalog written — %d datasets", category_slug, count)
+        return {"category_slug": category_slug, "dataset_count": count}
 
     slugs = fetch_category_slugs()
     fetch_and_store_category.expand(category_slug=slugs)
