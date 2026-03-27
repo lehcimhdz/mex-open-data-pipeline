@@ -1,0 +1,8 @@
+# Loose constraints — human-maintained source of truth.
+# requirements.txt is the pinned lockfile derived from this file.
+# To update: pip-compile requirements.in --output-file requirements.txt
+open-data-mexico>=1.0.0
+boto3>=1.34.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+openpyxl>=3.1.0

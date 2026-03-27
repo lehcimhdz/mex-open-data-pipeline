@@ -27,6 +27,7 @@ After all 28 categories are ingested, the Glue Catalog reflects the latest files
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta
 
 import boto3
@@ -37,8 +38,12 @@ from airflow.models import Variable
 from utils.converters import csv_to_parquet, excel_to_json
 from utils.s3_client import download_json, list_folder_prefixes, upload
 
+log = logging.getLogger(__name__)
+
 CSV_FORMATS = {"csv"}
 EXCEL_FORMATS = {"xls", "xlsx"}
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_S3_MULTIPART_THRESHOLD = 8 * 1024 * 1024  # 8 MB — use multipart above this size
 
 
 def _bucket() -> str:
@@ -54,11 +59,88 @@ def _glue_crawler() -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _download_bytes(url: str, timeout: float = 120.0) -> bytes:
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as http:
-        resp = await http.get(url)
-        resp.raise_for_status()
-        return resp.content
+async def _download_bytes(url: str, timeout: float = 120.0, max_retries: int = 3) -> bytes:
+    """Download a URL as bytes with exponential backoff on transient errors."""
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as http:
+                resp = await http.get(url)
+                if resp.status_code in _RETRYABLE_STATUS:
+                    raise httpx.HTTPStatusError(
+                        f"HTTP {resp.status_code}", request=resp.request, response=resp
+                    )
+                resp.raise_for_status()
+                return resp.content
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                wait = 2**attempt  # 1 s, 2 s, 4 s
+                log.warning("Download attempt %d/%d failed (%s) — retrying in %ds", attempt + 1, max_retries, exc, wait)
+                await asyncio.sleep(wait)
+    raise last_exc  # type: ignore[misc]
+
+
+async def _stream_to_s3(url: str, bucket: str, key: str, content_type: str = "application/octet-stream") -> int:
+    """Stream a URL directly to S3 via multipart upload — never buffers the full file in RAM.
+
+    Returns the total number of bytes uploaded.
+    Aborts the multipart upload automatically on any error.
+    """
+    PART_SIZE = _S3_MULTIPART_THRESHOLD
+    s3 = boto3.client("s3")
+    mpu = s3.create_multipart_upload(Bucket=bucket, Key=key, ContentType=content_type)
+    upload_id: str = mpu["UploadId"]
+    parts: list[dict] = []
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0, connect=10.0), follow_redirects=True
+        ) as http:
+            async with http.stream("GET", url) as resp:
+                resp.raise_for_status()
+                buffer = bytearray()
+                total_bytes = 0
+                part_number = 1
+
+                async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
+                    buffer.extend(chunk)
+                    total_bytes += len(chunk)
+                    if len(buffer) >= PART_SIZE:
+                        part = s3.upload_part(
+                            Bucket=bucket, Key=key,
+                            UploadId=upload_id, PartNumber=part_number,
+                            Body=bytes(buffer),
+                        )
+                        parts.append({"PartNumber": part_number, "ETag": part["ETag"]})
+                        part_number += 1
+                        buffer = bytearray()
+
+                # Last (possibly smaller) part — S3 allows any size for the final part
+                if buffer:
+                    part = s3.upload_part(
+                        Bucket=bucket, Key=key,
+                        UploadId=upload_id, PartNumber=part_number,
+                        Body=bytes(buffer),
+                    )
+                    parts.append({"PartNumber": part_number, "ETag": part["ETag"]})
+
+        if not parts:
+            # Empty file — abort multipart and upload as empty object
+            s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+            s3.put_object(Bucket=bucket, Key=key, Body=b"", ContentType=content_type)
+            return 0
+
+        s3.complete_multipart_upload(
+            Bucket=bucket, Key=key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": parts},
+        )
+        return total_bytes
+
+    except Exception:
+        s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+        raise
 
 
 async def _process_resource(client, resource, category_slug: str, dataset_slug: str, bucket: str) -> None:
@@ -73,36 +155,31 @@ async def _process_resource(client, resource, category_slug: str, dataset_slug: 
     try:
         if fmt in CSV_FORMATS:
             csv_str = await client.get_resource_data(resource)
-
             upload(bucket, f"{raw_base}.csv", csv_str, "text/csv")
-
             parquet_bytes = csv_to_parquet(csv_str)
             upload(bucket, f"{curated_prefix}/data.parquet", parquet_bytes)
 
         elif fmt in EXCEL_FORMATS:
-            raw_bytes = await _download_bytes(resource.download_url)
-            upload(bucket, f"{raw_base}.{fmt}", raw_bytes)
-
+            # Stream directly to S3 — Excel files can be large
+            await _stream_to_s3(resource.download_url, bucket, f"{raw_base}.{fmt}")
             try:
+                raw_bytes = await _download_bytes(resource.download_url)
                 json_str = excel_to_json(raw_bytes)
                 upload(bucket, f"{raw_base}.json", json_str, "application/json")
             except Exception as exc:
-                print(f"    [WARN] Excel→JSON failed for {resource.resource_id}: {exc}")
+                log.warning("Excel→JSON failed for %s: %s", resource.resource_id, exc)
 
         else:
-            # Unknown format — store raw bytes (best effort) + metadata JSON
+            # Unknown format — stream to S3 (best effort) + metadata JSON
             try:
-                raw_bytes = await _download_bytes(resource.download_url)
                 ext = fmt if fmt else "bin"
-                upload(bucket, f"{raw_base}.{ext}", raw_bytes)
+                await _stream_to_s3(resource.download_url, bucket, f"{raw_base}.{ext}")
             except Exception as exc:
-                print(f"    [WARN] Binary download failed for {resource.resource_id}: {exc}")
-
-            meta_json = resource.model_dump_json()
-            upload(bucket, f"{raw_base}_meta.json", meta_json, "application/json")
+                log.warning("Binary stream failed for %s: %s", resource.resource_id, exc)
+            upload(bucket, f"{raw_base}_meta.json", resource.model_dump_json(), "application/json")
 
     except Exception as exc:
-        print(f"    [ERROR] resource {resource.resource_id} ({fmt}): {exc}")
+        log.error("resource %s (%s): %s", resource.resource_id, fmt, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +222,7 @@ def ingest_datasets():
         async def _run() -> dict:
             catalog = download_json(bucket, f"raw/{category_slug}/_catalog.json")
             dataset_items = catalog["datasets"]
-            print(f"[{category_slug}] {len(dataset_items)} datasets in catalog")
+            log.info("[%s] %d datasets in catalog", category_slug, len(dataset_items))
 
             ok = 0
             skipped = 0
@@ -169,7 +246,7 @@ def ingest_datasets():
 
                         detail = await client.get_dataset(slug)
                         if detail is None:
-                            print(f"  [SKIP] {slug} — not found")
+                            log.warning("[%s] %s — not found", category_slug, slug)
                             continue
 
                         # Store updated metadata
@@ -182,10 +259,10 @@ def ingest_datasets():
                         ok += 1
 
                     except Exception as exc:
-                        print(f"  [ERROR] {category_slug}/{slug}: {exc}")
+                        log.error("[%s] %s: %s", category_slug, slug, exc)
                         failed += 1
 
-            print(f"[{category_slug}] done — updated={ok}, skipped={skipped}, failed={failed}")
+            log.info("[%s] done — updated=%d, skipped=%d, failed=%d", category_slug, ok, skipped, failed)
             return {"category": category_slug, "ok": ok, "skipped": skipped, "failed": failed}
 
         return asyncio.run(_run())
@@ -196,15 +273,15 @@ def ingest_datasets():
         total_ok = sum(r.get("ok", 0) for r in results)
         total_skipped = sum(r.get("skipped", 0) for r in results)
         total_failed = sum(r.get("failed", 0) for r in results)
-        print(f"Ingest complete — updated={total_ok}, skipped={total_skipped}, failed={total_failed}")
+        log.info("Ingest complete — updated=%d, skipped=%d, failed=%d", total_ok, total_skipped, total_failed)
 
         if total_ok == 0:
-            print("Nothing changed today — Glue crawler skipped")
+            log.info("Nothing changed today — Glue crawler skipped")
             return "crawler_skipped:no_changes"
 
         crawler_name = _glue_crawler()
         boto3.client("glue").start_crawler(Name=crawler_name)
-        print(f"Glue crawler '{crawler_name}' started ({total_ok} datasets updated)")
+        log.info("Glue crawler '%s' started (%d datasets updated)", crawler_name, total_ok)
         return f"crawler_started:{crawler_name}"
 
     slugs = get_category_slugs()
