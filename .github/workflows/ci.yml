@@ -7,6 +7,7 @@ on:
     branches: [main]
 
 jobs:
+  # ── Code style & formatting ───────────────────────────────────────────────
   lint:
     name: ruff
     runs-on: ubuntu-latest
@@ -21,6 +22,7 @@ jobs:
       - name: Check formatting
         run: ruff format --check dags/
 
+  # ── Type checking ─────────────────────────────────────────────────────────
   typecheck:
     name: mypy
     runs-on: ubuntu-latest
@@ -34,6 +36,21 @@ jobs:
       - name: Run mypy
         run: mypy dags/ --ignore-missing-imports
 
+  # ── Dependency security audit ─────────────────────────────────────────────
+  security:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit dependencies for known CVEs
+        run: pip-audit -r requirements.txt
+
+  # ── Tests with coverage ───────────────────────────────────────────────────
   test:
     name: pytest
     runs-on: ubuntu-latest
@@ -47,8 +64,9 @@ jobs:
           pip install apache-airflow==2.9.2 --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.2/constraints-3.11.txt"
           pip install -r requirements.txt pytest pytest-cov
       - name: Run tests
-        run: pytest tests/ --cov=dags/utils --cov-report=term-missing --cov-fail-under=70
+        run: pytest tests/ --cov=dags/utils --cov-report=term-missing --cov-fail-under=85
 
+  # ── DAG syntax validation ─────────────────────────────────────────────────
   dag-syntax:
     name: DAG syntax
     runs-on: ubuntu-latest
@@ -64,5 +82,6 @@ jobs:
       - name: Validate DAG syntax
         run: |
           export PYTHONPATH=$PYTHONPATH:$(pwd)/dags
-          python -c "import dags.sync_catalog; print('sync_catalog OK')"
+          python -c "import dags.sync_catalog;    print('sync_catalog OK')"
           python -c "import dags.ingest_datasets; print('ingest_datasets OK')"
+          python -c "import dags.load_to_db;      print('load_to_db OK')"

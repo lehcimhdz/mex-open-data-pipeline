@@ -6,3 +6,4 @@ pandas==2.2.3
 pyarrow==17.0.0
 openpyxl==3.1.5
 psycopg2-binary==2.9.9
+apache-airflow-providers-celery==3.3.4

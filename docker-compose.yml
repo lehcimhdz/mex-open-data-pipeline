@@ -1,18 +1,25 @@
 ---
-# Apache Airflow 2.9 — LocalExecutor (single-machine, no Celery/Redis)
+# Apache Airflow 2.9 — CeleryExecutor (Redis broker, scalable workers)
 # Usage:
-#   cp .env.example .env && nano .env
+#   cp .env.example .env && nano .env        # fill in FERNET_KEY, SECRET_KEY, ADMIN_PASSWORD
 #   docker compose up airflow-init
 #   docker compose up -d
+#
+# Scale workers:  docker compose up -d --scale airflow-worker=2
 
 x-airflow-common: &airflow-common
   image: apache/airflow:2.9.2
   env_file: .env
   environment:
-    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    # Fernet key encrypts Connections and Variables in the metadata DB.
+    # Required — generate with: python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:?AIRFLOW__CORE__FERNET_KEY must be set in .env}
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
     AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:?AIRFLOW_SECRET_KEY must be set in .env}
     PYTHONPATH: /opt/airflow/dags
     # Admin credentials — set in .env, never hardcode here
@@ -26,8 +33,11 @@ x-airflow-common: &airflow-common
   depends_on:
     postgres:
       condition: service_healthy
+    redis:
+      condition: service_healthy
 
 services:
+  # ── Metadata database ────────────────────────────────────────────────────
   postgres:
     image: postgres:15
     environment:
@@ -43,6 +53,19 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # ── Celery broker ────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ── One-time initialisation ──────────────────────────────────────────────
   airflow-init:
     <<: *airflow-common
     entrypoint: /bin/bash
@@ -61,6 +84,7 @@ services:
         echo "Airflow initialised."
     restart: "no"
 
+  # ── Scheduler ────────────────────────────────────────────────────────────
   airflow-scheduler:
     <<: *airflow-common
     command: >
@@ -73,6 +97,21 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # ── Celery worker ────────────────────────────────────────────────────────
+  # Scale horizontally: docker compose up -d --scale airflow-worker=2
+  airflow-worker:
+    <<: *airflow-common
+    command: >
+      bash -c "pip install --quiet -r /requirements.txt && airflow celery worker --loglevel=info --concurrency=4"
+    healthcheck:
+      test: ["CMD-SHELL", "celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d celery@$${HOSTNAME}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Web UI ───────────────────────────────────────────────────────────────
   airflow-webserver:
     <<: *airflow-common
     command: >
@@ -89,3 +128,4 @@ services:
 
 volumes:
   postgres-db:
+  redis-data:

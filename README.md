@@ -58,6 +58,9 @@ datos.gob.mx API
 |-----|----------|---------|-----|
 | `sync_catalog` | Mon-Fri 06:00 UTC | Fetch category + dataset listings → S3 | 30 min |
 | `ingest_datasets` | Mon-Fri 07:00 UTC | Download resources, convert to Parquet | 2 h |
+| `load_to_db` | Mon-Fri 08:30 UTC | Upsert S3 catalog into PostgreSQL (FastAPI backend) + data quality gate | 2 h |
+
+SLA misses trigger a Slack alert automatically (set `SLACK_WEBHOOK_URL` Airflow Variable to enable).
 
 ---
 
@@ -101,15 +104,16 @@ cd mex-open-data-pipeline
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env — fill in AIRFLOW_SECRET_KEY and AIRFLOW_ADMIN_PASSWORD at minimum
-# Generate a secret key:
-python3 -c "import secrets; print(secrets.token_hex(32))"
+# Edit .env — fill in at minimum:
+#   AIRFLOW_SECRET_KEY  → python3 -c "import secrets; print(secrets.token_hex(32))"
+#   AIRFLOW_ADMIN_PASSWORD
+#   AIRFLOW__CORE__FERNET_KEY  → python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 
 # 3. Initialise Airflow (runs db migrate + creates admin user)
 docker compose up airflow-init
 
-# 4. Start scheduler and webserver
-docker compose up -d airflow-scheduler airflow-webserver
+# 4. Start scheduler, worker, and webserver
+docker compose up -d airflow-scheduler airflow-worker airflow-webserver
 
 # 5. Set Airflow Variables (bucket name and crawler name from terraform output)
 docker compose exec airflow-scheduler \
@@ -133,7 +137,9 @@ Open the Airflow UI at **http://localhost:8080**, then unpause both DAGs.
 |----------|----------|-------------|
 | `DATA_LAKE_BUCKET` | Yes | S3 bucket name — from `terraform output bucket_name` |
 | `GLUE_CRAWLER_NAME` | Yes | Glue crawler name — from `terraform output glue_crawler_name` |
-| `ALERT_EMAIL` | No | Email for failure alerts (requires SMTP configured) |
+| `DATABASE_URL` | Yes (load_to_db) | PostgreSQL DSN for the FastAPI backend DB |
+| `ALERT_EMAIL` | No | Email address for DAG failure alerts (requires SMTP in .env) |
+| `SLACK_WEBHOOK_URL` | No | Slack Incoming Webhook URL — enables failure + SLA miss alerts |
 
 ---
 
