@@ -13,6 +13,11 @@ Upsert strategy:
   datasets    — ON CONFLICT (slug) DO UPDATE only when last_updated differs
   resources   — ON CONFLICT (resource_id) DO UPDATE always (small table)
 
+Post-load quality gate:
+  validate_load checks row counts and NULLs in critical columns.
+  It raises ValueError if the datasets table is empty after a non-zero update run,
+  or if resources.dataset_slug contains NULLs (referential integrity).
+
 Airflow Variable required:
   DATABASE_URL — e.g. postgresql://user:pass@host:5432/mex_open_data
 """
@@ -30,7 +35,7 @@ from airflow.decorators import dag, task
 from airflow.models import Variable
 from airflow.sensors.external_task import ExternalTaskSensor
 
-from utils.callbacks import on_dag_failure
+from utils.callbacks import on_dag_failure, on_sla_miss
 from utils.s3_client import download_json, list_folder_prefixes
 
 log = logging.getLogger(__name__)
@@ -120,6 +125,7 @@ def _upsert_resource(cur, row: dict) -> None:
     },
     tags=["load", "postgres", "datos-gob-mx"],
     doc_md=__doc__,
+    sla_miss_callback=on_sla_miss,
 )
 def load_to_db():
 
@@ -131,6 +137,11 @@ def load_to_db():
         timeout=3600,
         poke_interval=60,
     )
+
+    @task(execution_timeout=timedelta(hours=2))
+    def get_category_slugs() -> list[str]:
+        prefixes = list_folder_prefixes(_bucket(), "raw/")
+        return [p.split("/")[1] for p in prefixes if p.split("/")[1]]
 
     @task(execution_timeout=timedelta(hours=2))
     def load_category(category_slug: str) -> dict:
@@ -147,7 +158,6 @@ def load_to_db():
         try:
             with conn:
                 with conn.cursor() as cur:
-                    # Upsert category
                     _upsert_category(
                         cur,
                         slug=category_slug,
@@ -156,7 +166,6 @@ def load_to_db():
                         updated_at=cat.get("updated_at"),
                     )
 
-                    # Update dataset_count on category
                     cur.execute(
                         "UPDATE categories SET dataset_count = %s WHERE slug = %s",
                         (len(dataset_items), category_slug),
@@ -170,7 +179,7 @@ def load_to_db():
                             meta = download_json(bucket, meta_key)
                         except Exception:
                             skipped += 1
-                            continue  # metadata not yet ingested
+                            continue
 
                         org = meta.get("organization") or {}
                         org_name = org.get("title") or org.get("name") if isinstance(org, dict) else str(org)
@@ -207,19 +216,81 @@ def load_to_db():
         return {"category": category_slug, "ok": ok, "skipped": skipped, "failed": failed}
 
     @task
-    def get_category_slugs() -> list[str]:
-        prefixes = list_folder_prefixes(_bucket(), "raw/")
-        return [p.split("/")[1] for p in prefixes if p.split("/")[1]]
-
-    @task
     def log_summary(results: list[dict]) -> None:
         total_ok = sum(r.get("ok", 0) for r in results)
         total_skipped = sum(r.get("skipped", 0) for r in results)
         log.info("load_to_db complete — updated=%d, skipped=%d", total_ok, total_skipped)
 
+    @task
+    def validate_load(results: list[dict]) -> dict:
+        """Post-load data quality gate: row counts + NULL checks in critical columns.
+
+        Raises ValueError if:
+        - datasets table is empty after a run that processed updates.
+        - resources.dataset_slug contains NULLs (referential integrity violation).
+
+        Logs a warning (non-fatal) for NULL or empty dataset titles.
+        """
+        conn = _connect()
+        counts: dict[str, int] = {}
+
+        try:
+            with conn.cursor() as cur:
+                for table in ("categories", "datasets", "resources"):
+                    cur.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+                    counts[f"{table}_total"] = cur.fetchone()[0]
+
+                cur.execute(
+                    "SELECT COUNT(*) FROM datasets WHERE title IS NULL OR title = ''"
+                )
+                counts["datasets_null_title"] = cur.fetchone()[0]
+
+                cur.execute(
+                    "SELECT COUNT(*) FROM resources WHERE dataset_slug IS NULL"
+                )
+                counts["resources_null_fk"] = cur.fetchone()[0]
+        finally:
+            conn.close()
+
+        total_updated = sum(r.get("ok", 0) for r in results)
+
+        log.info(
+            "data_quality | categories=%d | datasets=%d | resources=%d | "
+            "null_titles=%d | null_fk=%d | updated_this_run=%d",
+            counts["categories_total"],
+            counts["datasets_total"],
+            counts["resources_total"],
+            counts["datasets_null_title"],
+            counts["resources_null_fk"],
+            total_updated,
+        )
+
+        # ── Critical failures ─────────────────────────────────────────────────
+        if total_updated > 0 and counts["datasets_total"] == 0:
+            raise ValueError(
+                f"Data quality CRITICAL: {total_updated} updates processed "
+                "but datasets table is empty — possible truncation or schema mismatch"
+            )
+
+        if counts["resources_null_fk"] > 0:
+            raise ValueError(
+                f"Data quality CRITICAL: {counts['resources_null_fk']} resources "
+                "with NULL dataset_slug (referential integrity violation)"
+            )
+
+        # ── Non-fatal warnings ────────────────────────────────────────────────
+        if counts["datasets_null_title"] > 0:
+            log.warning(
+                "data_quality_warning | %d datasets have NULL or empty title",
+                counts["datasets_null_title"],
+            )
+
+        return counts
+
     slugs = get_category_slugs()
     results = load_category.expand(category_slug=slugs)
     log_summary(results)
+    validate_load(results)
 
     wait_for_ingest >> slugs
 

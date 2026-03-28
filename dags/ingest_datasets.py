@@ -39,7 +39,7 @@ from airflow.models import Variable
 from airflow.sensors.external_task import ExternalTaskSensor
 from airflow.utils.trigger_rule import TriggerRule
 
-from utils.callbacks import on_dag_failure
+from utils.callbacks import on_dag_failure, on_sla_miss
 from utils.converters import csv_to_parquet, excel_to_json
 from utils.s3_client import download_json, list_folder_prefixes, upload
 from utils.schema_validator import validate_schema
@@ -218,6 +218,7 @@ async def _process_resource(client, resource, category_slug: str, dataset_slug: 
     },
     tags=["ingest", "datos-gob-mx"],
     doc_md=__doc__,
+    sla_miss_callback=on_sla_miss,
 )
 def ingest_datasets():
 

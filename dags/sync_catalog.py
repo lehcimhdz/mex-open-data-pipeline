@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from airflow.decorators import dag, task
 from airflow.models import Variable
 
-from utils.callbacks import on_dag_failure
+from utils.callbacks import on_dag_failure, on_sla_miss
 from utils.s3_client import upload  # noqa: E402  (Airflow adds dags/ to sys.path)
 
 log = logging.getLogger(__name__)
@@ -48,6 +48,7 @@ def _bucket() -> str:
     },
     tags=["catalog", "datos-gob-mx"],
     doc_md=__doc__,
+    sla_miss_callback=on_sla_miss,
 )
 def sync_catalog():
 
