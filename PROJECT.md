@@ -12,7 +12,7 @@ Hoja de ruta para llevar el pipeline de Airflow a un estado profesional, seguro 
 
 ---
 
-## 🔴 Semana 1 — Seguridad y estabilidad
+## 🔴 1 — Seguridad y estabilidad
 
 Sin estos ítems el proyecto no debe ir a producción.
 
@@ -24,7 +24,7 @@ Sin estos ítems el proyecto no debe ir a producción.
 
 ---
 
-## 🟠 Semana 2 — Operabilidad
+## 🟠 2 — Operabilidad
 
 Para que el pipeline pueda monitorearse y recuperarse sin intervención manual.
 
@@ -37,24 +37,24 @@ Para que el pipeline pueda monitorearse y recuperarse sin intervención manual.
 
 ---
 
-## 🟡 Semana 3 — Calidad de código y CI/CD
+## 🟡 3 — Calidad de código y CI/CD
 
-- [ ] Crear `.github/workflows/ci.yml`:
+- [x] Crear `.github/workflows/ci.yml`:
   - `ruff check` y `ruff format --check` en cada push/PR
   - `mypy dags/` para type checking
   - `pytest tests/ --cov` con cobertura mínima del 70 %
   - Validación de sintaxis de DAGs (`python -c "import dags.sync_catalog"`)
-- [ ] Crear `.pre-commit-config.yaml` con hooks: ruff, mypy, detect-secrets
-- [ ] Añadir type hints completos en `dags/utils/s3_client.py` y `dags/utils/converters.py`
-- [ ] Crear `tests/` con pruebas unitarias:
+- [x] Crear `.pre-commit-config.yaml` con hooks: ruff, mypy, detect-secrets
+- [x] Añadir type hints completos en `dags/utils/s3_client.py` y `dags/utils/converters.py`
+- [x] Crear `tests/` con pruebas unitarias:
   - `test_converters.py` — CSV vacío, unicode, columnas faltantes, Excel corrupto
   - `test_s3_client.py` — con mocks de boto3
   - `test_dags.py` — estructura del DAG, dependencias entre tareas, ausencia de ciclos
-- [ ] Crear `pyproject.toml` con configuración de ruff y mypy
+- [x] Crear `pyproject.toml` con configuración de ruff y mypy
 
 ---
 
-## 🟢 Semana 4 — Madurez y documentación
+## 🟢 4 — Madurez y documentación
 
 - [ ] Escribir README completo: arquitectura, prerrequisitos, setup local, variables de Airflow, troubleshooting
 - [ ] Crear `Makefile` con: `make lint`, `make test`, `make docker-up`, `make docker-down`, `make logs`
@@ -67,8 +67,8 @@ Para que el pipeline pueda monitorearse y recuperarse sin intervención manual.
 ## Orden de implementación
 
 ```
-1. Seguridad (semana 1)     → .gitignore, password, retry, streaming, pin deps
-2. Operabilidad (semana 2)  → logging, sensor, max_active_runs, SLAs, alertas
-3. CI/CD y tests (semana 3) → workflows, pre-commit, tests unitarios, pyproject.toml
-4. Madurez (semana 4)       → README, Makefile, schema validation, ec2/setup.sh robusto
+1. Seguridad (1)     → .gitignore, password, retry, streaming, pin deps
+2. Operabilidad (2)  → logging, sensor, max_active_runs, SLAs, alertas
+3. CI/CD y tests (3) → workflows, pre-commit, tests unitarios, pyproject.toml
+4. Madurez (4)       → README, Makefile, schema validation, ec2/setup.sh robusto
 ```

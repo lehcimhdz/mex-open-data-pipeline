@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      - name: Check style
+        run: ruff check dags/
+      - name: Check formatting
+        run: ruff format --check dags/
+
+  typecheck:
+    name: mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt mypy
+      - name: Run mypy
+        run: mypy dags/ --ignore-missing-imports
+
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install apache-airflow==2.9.2 --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.2/constraints-3.11.txt"
+          pip install -r requirements.txt pytest pytest-cov
+      - name: Run tests
+        run: pytest tests/ --cov=dags/utils --cov-report=term-missing --cov-fail-under=70
+
+  dag-syntax:
+    name: DAG syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install apache-airflow==2.9.2 --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.2/constraints-3.11.txt"
+          pip install -r requirements.txt
+      - name: Validate DAG syntax
+        run: |
+          export PYTHONPATH=$PYTHONPATH:$(pwd)/dags
+          python -c "import dags.sync_catalog; print('sync_catalog OK')"
+          python -c "import dags.ingest_datasets; print('ingest_datasets OK')"
