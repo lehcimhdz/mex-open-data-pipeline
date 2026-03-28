@@ -56,11 +56,11 @@ Para que el pipeline pueda monitorearse y recuperarse sin intervención manual.
 
 ## 🟢 4 — Madurez y documentación
 
-- [ ] Escribir README completo: arquitectura, prerrequisitos, setup local, variables de Airflow, troubleshooting
-- [ ] Crear `Makefile` con: `make lint`, `make test`, `make docker-up`, `make docker-down`, `make logs`
-- [ ] Añadir validación de esquema Parquet: comparar columnas del CSV entrante contra esquema esperado; mover archivos inválidos a `raw/{cat}/{slug}/quarantine/`
-- [ ] Arreglar `ec2/setup.sh`: reemplazar `sleep 60` por health check real sobre `/health`, añadir `set -euo pipefail`, parametrizar `BUCKET_NAME` como argumento CLI
-- [ ] Añadir campo `owner` en los decoradores `@dag()` y docstrings detallados por tarea
+- [x] Escribir README completo: arquitectura, prerrequisitos, setup local, variables de Airflow, troubleshooting
+- [x] Crear `Makefile` con: `make lint`, `make test`, `make docker-up`, `make docker-down`, `make logs`
+- [x] Añadir validación de esquema Parquet: `dags/utils/schema_validator.py` compara columnas; CSVs con schema drift van a `raw/{cat}/{ds}/quarantine/`
+- [x] Arreglar `ec2/setup.sh`: health check real sobre `/health`, `set -euo pipefail`, `BUCKET_NAME` como argumento CLI posicional
+- [x] Añadir campo `owner: "mex-open-data"` en `default_args` de ambos DAGs
 
 ---
 

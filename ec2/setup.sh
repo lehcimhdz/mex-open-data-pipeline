@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup.sh — Bootstrap Airflow on a fresh Ubuntu EC2 instance
+# setup.sh — Bootstrap Airflow on a fresh Ubuntu 22.04 EC2 instance
 #
 # Prerequisites:
 #   - EC2 instance with the mex-open-data-pipeline-profile IAM instance profile attached
@@ -7,14 +7,31 @@
 #   - Inbound port 8080 open in the security group (for the Airflow UI)
 #
 # Usage:
-#   chmod +x setup.sh && ./setup.sh
+#   chmod +x setup.sh
+#   ./setup.sh <bucket_name> [crawler_name]
+#
+# Arguments:
+#   bucket_name   — value of `terraform output bucket_name` (required)
+#   crawler_name  — value of `terraform output glue_crawler_name`
+#                   (default: mex-open-data-curated-crawler)
+#
+# Example:
+#   ./setup.sh mex-open-data-lake-123456789012
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Arguments
+# ---------------------------------------------------------------------------
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <bucket_name> [crawler_name]" >&2
+  exit 1
+fi
+
+BUCKET_NAME="$1"
+CRAWLER_NAME="${2:-mex-open-data-curated-crawler}"
 REPO_URL="https://github.com/lehcimhdz/mex-open-data-pipeline.git"
 APP_DIR="/opt/mex-open-data-pipeline"
-BUCKET_NAME=""          # Set this — output of: terraform output bucket_name
-CRAWLER_NAME="mex-open-data-curated-crawler"
 
 echo "==> Updating system packages"
 sudo apt-get update -y
@@ -31,46 +48,61 @@ cd "$APP_DIR"
 
 echo "==> Setting up environment file"
 cp .env.example .env
-sed -i "s/^# AWS_ACCESS_KEY_ID=.*//" .env   # EC2 uses IAM role — no static credentials needed
+# EC2 uses the attached IAM role — no static credentials needed
+sed -i '/^# AWS_ACCESS_KEY_ID=/d; /^# AWS_SECRET_ACCESS_KEY=/d' .env
 
 echo ""
-echo "  ┌─────────────────────────────────────────────────────────┐"
-echo "  │  Edit $APP_DIR/.env if needed, then press Enter.        │"
-echo "  └─────────────────────────────────────────────────────────┘"
+echo "  ┌──────────────────────────────────────────────────────────────┐"
+echo "  │  Edit $APP_DIR/.env: set AIRFLOW_SECRET_KEY and             │"
+echo "  │  AIRFLOW_ADMIN_PASSWORD, then press Enter to continue.       │"
+echo "  └──────────────────────────────────────────────────────────────┘"
 read -r
 
 echo "==> Creating runtime directories"
 mkdir -p logs plugins
 
 echo "==> Initialising Airflow (db migrate + admin user)"
-docker compose up airflow-init
+docker compose up airflow-init --exit-code-from airflow-init
 
 echo "==> Starting Airflow (scheduler + webserver)"
 docker compose up -d airflow-scheduler airflow-webserver
 
-echo "==> Waiting for Airflow to become healthy (60 s)"
-sleep 60
+echo "==> Waiting for Airflow webserver to become healthy..."
+TIMEOUT=120
+ELAPSED=0
+INTERVAL=5
+until curl -sf http://localhost:8080/health | grep -q '"status": "healthy"'; do
+  if [[ $ELAPSED -ge $TIMEOUT ]]; then
+    echo "ERROR: Airflow did not become healthy within ${TIMEOUT}s" >&2
+    docker compose logs airflow-webserver | tail -30 >&2
+    exit 1
+  fi
+  sleep $INTERVAL
+  ELAPSED=$((ELAPSED + INTERVAL))
+  echo "  ... waiting (${ELAPSED}s / ${TIMEOUT}s)"
+done
+echo "  Airflow is healthy."
 
 echo "==> Setting Airflow Variables"
-if [[ -z "$BUCKET_NAME" ]]; then
-  echo "  [WARN] BUCKET_NAME is empty — set it manually:"
-  echo "  docker compose exec airflow-scheduler airflow variables set DATA_LAKE_BUCKET <bucket>"
-else
-  docker compose exec airflow-scheduler \
-    airflow variables set DATA_LAKE_BUCKET "$BUCKET_NAME"
-fi
+docker compose exec airflow-scheduler \
+  airflow variables set DATA_LAKE_BUCKET "$BUCKET_NAME"
 
 docker compose exec airflow-scheduler \
   airflow variables set GLUE_CRAWLER_NAME "$CRAWLER_NAME"
 
+PUBLIC_IP=$(curl -sf http://169.254.169.254/latest/meta-data/public-ipv4 || echo "unknown")
+
 echo ""
 echo "======================================================"
 echo "  Airflow is running!"
-echo "  UI  : http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):8080"
-echo "  User: admin / Password: admin"
+echo "  UI      : http://${PUBLIC_IP}:8080"
+echo "  Bucket  : ${BUCKET_NAME}"
+echo "  Crawler : ${CRAWLER_NAME}"
 echo ""
 echo "  Next steps:"
-echo "  1. Change the admin password in the Airflow UI."
-echo "  2. Unpause the sync_catalog and ingest_datasets DAGs."
-echo "  3. Trigger sync_catalog manually for the first run."
+echo "  1. Unpause sync_catalog and ingest_datasets in the Airflow UI."
+echo "  2. Trigger sync_catalog manually for the first run."
+echo "  3. Set ALERT_EMAIL variable if you want failure emails:"
+echo "     docker compose exec airflow-scheduler \\"
+echo "       airflow variables set ALERT_EMAIL you@example.com"
 echo "======================================================"

@@ -41,6 +41,7 @@ def _bucket() -> str:
     catchup=False,
     max_active_runs=1,
     default_args={
+        "owner": "mex-open-data",
         "retries": 2,
         "retry_delay": timedelta(minutes=5),
         "on_failure_callback": on_dag_failure,

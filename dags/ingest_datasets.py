@@ -27,11 +27,13 @@ After all 28 categories are ingested, the Glue Catalog reflects the latest files
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 from datetime import datetime, timedelta
 
 import boto3
 import httpx
+import pandas as pd
 from airflow.decorators import dag, task
 from airflow.models import Variable
 from airflow.sensors.external_task import ExternalTaskSensor
@@ -40,6 +42,7 @@ from airflow.utils.trigger_rule import TriggerRule
 from utils.callbacks import on_dag_failure
 from utils.converters import csv_to_parquet, excel_to_json
 from utils.s3_client import download_json, list_folder_prefixes, upload
+from utils.schema_validator import validate_schema
 
 log = logging.getLogger(__name__)
 
@@ -159,8 +162,19 @@ async def _process_resource(client, resource, category_slug: str, dataset_slug: 
         if fmt in CSV_FORMATS:
             csv_str = await client.get_resource_data(resource)
             upload(bucket, f"{raw_base}.csv", csv_str, "text/csv")
-            parquet_bytes = csv_to_parquet(csv_str)
-            upload(bucket, f"{curated_prefix}/data.parquet", parquet_bytes)
+
+            # Schema validation — compare columns to the stored Parquet before overwriting
+            df = pd.read_csv(io.StringIO(csv_str), low_memory=False)
+            parquet_key = f"{curated_prefix}/data.parquet"
+            valid, reason = validate_schema(list(df.columns), bucket, parquet_key)
+            if not valid:
+                quarantine_key = f"raw/{category_slug}/{dataset_slug}/quarantine/{resource.resource_id}.csv"
+                upload(bucket, quarantine_key, csv_str, "text/csv")
+                log.warning("Quarantined %s — %s", resource.resource_id, reason)
+            else:
+                buf = io.BytesIO()
+                df.to_parquet(buf, engine="pyarrow", index=False)
+                upload(bucket, parquet_key, buf.getvalue())
 
         elif fmt in EXCEL_FORMATS:
             # Stream directly to S3 — Excel files can be large
@@ -197,6 +211,7 @@ async def _process_resource(client, resource, category_slug: str, dataset_slug: 
     catchup=False,
     max_active_runs=1,
     default_args={
+        "owner": "mex-open-data",
         "retries": 1,
         "retry_delay": timedelta(minutes=15),
         "on_failure_callback": on_dag_failure,
