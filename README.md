@@ -2,6 +2,10 @@
 
 Airflow 2.9 pipeline that ingests all datasets from [datos.gob.mx](https://datos.gob.mx) into an AWS S3 data lake daily. Uses the [open-data-mexico](https://pypi.org/project/open-data-mexico/) library as the API client.
 
+This pipeline feeds **two independent consumers**:
+- **[mex-open-data-backend-fastapi](https://github.com/lehcimhdz/mex-open-data-backend-fastapi)** — via the `load_to_db` DAG, which upserts categories, datasets and resources into PostgreSQL so the REST API can serve them.
+- **[mex-open-data-spark](https://github.com/lehcimhdz/mex-open-data-spark)** — reads `curated/` from S3 independently to run batch analytics (quality reports, aggregations, Athena index). Spark does not write back to PostgreSQL or the backend.
+
 Infrastructure (S3, IAM, Glue, Athena) is provisioned separately in [mex-open-data-aws-s3](https://github.com/lehcimhdz/mex-open-data-aws-s3).
 
 ---
